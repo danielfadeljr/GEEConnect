@@ -1,0 +1,141 @@
+/*
+
+۞ Código do mapa de conectividade para o estado de São Paulo ۞  
+
+► Elaborado por: Daniel Fadel Jr.
+
+► Contato: danielf.j@outlook.com
+           danielfadel@estudante.ufscar.br
+
+► Ultima atualização 01/09/2023
+
+*/
+
+//► Parâmetros de entrada
+
+var ano = 2022;
+
+var banda = 'classification_' + ano;
+
+//► Área de estudo (geometry)
+
+var estados = ee.FeatureCollection('projects/ee-danielfadeljr/assets/br_estados');
+var estado = estados.filterMetadata('NM_ESTADO','equals','SÃO PAULO');
+
+//Visualização
+//Map.addLayer(estado, {color: 'green'}, 'Estado de São Paulo', false);
+Map.centerObject(estado, 7);
+
+//► Uso e cobertura da terra MapBiomas (Coleção 7.1)
+
+var ColecaoMapbiomas = ee.Image('projects/mapbiomas-workspace/public/collection_S2_beta/collection_LULC_S2_beta')
+                       .select(banda)
+                       .clipToCollection(estado);
+
+//Visualização
+var palettes = require('users/mapbiomas/modules:Palettes.js');
+var VisParam = {'min': 0, 'max': 62, 'palette': palettes.get('classification8')};
+Map.addLayer(ColecaoMapbiomas.select(banda),VisParam , 'Colecao beta 10m ' + ano, false);
+
+//► Lista de classes presentes no estado de São Paulo
+
+/*var reduceRegion = ColecaoMapbiomas.reduceRegion({
+  reducer: ee.Reducer.frequencyHistogram(), 
+  geometry: estado.geometry(), 
+  scale: 10, 
+  bestEffort: true, 
+  maxPixels: 1e13, 
+  tileScale: 4
+});
+
+var classes = ee.Dictionary(reduceRegion.get('classification_' + ano)).keys();
+
+print('classes presentes no estado de São Paulo' ,classes);
+
+var inClasses = [      0     ,          3          ,          4         ,     5   ,            49        ,                11               ,          12         ,   32    ,           29         ,         50         ,                 13               ,    15    ,       9       ,         21       ,             23        ,         33          ,      31      ,  39  ,   20  ,             41               ,   46  ,    47   ,             48           ,      24         ,      30    ,             25              ];
+var outClasses = ['sem valor', 'Formação Florestal', 'Formação Savânica', 'Mangue', 'Restinga Arborizada', 'Campo Alagado e Área Pantanosa', 'Formação Campestre', 'Apicum', 'Afloramento Rochoso', 'Restinga Herbácea', 'Outras Formações não Florestais','Pastagem', 'Silvicultura', 'Mosaico de Usos',  'Praia, Duna e Areal', 'Rio, Lago e Oceano', 'Aquicultura','Soja', 'Cana', 'Outras Lavouras Temporárias', 'Café', 'Citrus', 'Outras Lavouras Perenes','Área Urbanizada', 'Mineração', 'Outras Áreas não Vegetadas'];
+var nomeClasses = ColecaoMapbiomas.eq(inClasses).rename(outClasses);*/
+//+19(lavoura temporária) e +36(lavoura perene)
+
+
+//► Mapa de resistência (Cumulative Cost Mapping)
+
+//Criando uma imagem binária (1 para floresta e 0 para não floresta)
+
+var imagem_filtrada = ColecaoMapbiomas.remap([3,4,5,49,11,12,32,29,50,13],[1,1,1,1,1,1,1,1,1,1],0);
+
+//Pesos de resistência para cada classe
+/////////////////////////////////////////o que fazer com pixels com valor 0 (classe 0)?
+
+var Classes = [0, 3, 4, 5, 49, 11, 12, 32, 29, 50, 13,
+                   15, 9, 21, 23, 33, 31, 19, 36,
+                   39, 20, 41, 46, 47, 48,
+                   24, 30, 25];
+var Pesos = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                   300, 650, 500, 500, 500, 500, 700, 500,
+                  700, 700, 700, 500, 500, 500,
+                  1000, 1000, 1000];
+                  
+var cost = ColecaoMapbiomas.remap(Classes, Pesos, 0);
+
+//Cumulative Cost (calculo da resistência em atravessar a cobertura do solo)
+
+var cumulativeCost = cost.cumulativeCost(imagem_filtrada, 20*1000, true);
+
+//Visualização
+var VisParam1 = {"opacity":1,
+                 "bands":["cumulative_cost"],
+                 "min":0,
+                 "max":5539749.214696075,
+                 "palette": ['ffffff','00ad5b','00eb7c','ffff00','ffa500','ff0000','b30000','000000']};
+Map.addLayer(cumulativeCost, VisParam1, 'Mapa de Resistência');
+//Map.addLayer(cumulativeCost, {}, 'Mapa de custo sem parâmetros de visualização', false);
+//Map.addLayer(imagem_filtrada.selfMask(),{palette:['#006400']},"Floresta e formação natural não florestal");
+
+//► Índice de conectividade
+
+//Obter o valor minimo e máximo de distância funcional na imagem
+
+var minDistanceValue = cumulativeCost.reduceRegion({
+  reducer: ee.Reducer.min(),
+  geometry: estado.geometry(),
+  scale: 10,
+  //maxPixels: 1e9,
+  bestEffort: true //bestEffort para permitir que o Earth Engine agregue os pixels em uma escala adequada.
+}).get('cumulative_cost');
+
+var maxDistanceValue = cumulativeCost.reduceRegion({
+  reducer: ee.Reducer.max(),
+  geometry: estado.geometry(),
+  scale: 10,
+  //maxPixels: 1e9,
+  bestEffort: true //bestEffort para permitir que o Earth Engine agregue os pixels em uma escala adequada.
+}).get('cumulative_cost');
+
+//normalizar os valores entre 0 e 1
+
+var normalized = cumulativeCost
+  .select(['cumulative_cost'])
+  .unitScale(minDistanceValue, maxDistanceValue);
+
+// Inverter os valores normalizados
+
+var invertedNormalized = normalized.expression('1 - x', {x: normalized});
+
+var minMaxDistanceValue = invertedNormalized.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: estado.geometry(),
+  scale: 10,
+  bestEffort: true
+});
+
+print('distância máxima e mínima', minMaxDistanceValue); //porem nao resulta em 0 absoluto, porque?
+
+Map.addLayer(invertedNormalized, {"palette": ['000000','b30000','ff0000','ffa500','ffff00','00eb7c','00ad5b','ffffff']}, 'Connectivity Index');
+
+//mascara para conectivdiade maior que 90%
+
+var distanciaFuncional = invertedNormalized.gte(0.90).selfMask();
+
+Map.addLayer(distanciaFuncional,{palette:['black']},"Distância funcional - 90%", false);
+Map.addLayer(imagem_filtrada.selfMask(),{palette:['#006400']},"Floresta e formação natural não florestal");
